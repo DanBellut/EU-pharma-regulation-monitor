@@ -1,152 +1,250 @@
-import time
+import argparse
+import html
+import json
+import os
+from datetime import datetime
+
 import requests
 from bs4 import BeautifulSoup
 
-class FantasyAIApiClient:
-    """Simuliert die Anbindung an ein modernes LLM (wie OpenAI GPT-4o)."""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        if not api_key.startswith("sk-fantasy-"):
-            raise ValueError("❌ API-Authentifizierungsfehler! Der Schlüssel muss mit 'sk-fantasy-' beginnen.")
+# EUR-Lex offers RSS feeds for saved searches (account required).
+# The feed URL is set via the EURLEX_RSS_URL environment variable.
+RSS_URL = os.environ.get("EURLEX_RSS_URL")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+MODEL = "llama3"
 
-    def generate_regulatory_briefing(self, model: str, prompt: str) -> dict:
-        """Simuliert den API-Call mit einer Netzwerk-Latenz und intelligenter Textgenerierung."""
-        print(f"📡 [API] Übermittle Daten an Cloud-Modell '{model}'...")
-        time.sleep(1.2)  # Simuliert die Rechenzeit des KI-Servers
-        
-        # Auswertungs-Logik der Fantasie-KI anhand von Signalwörtern
-        prompt_lower = prompt.lower()
-        
-        if "clinical trials" in prompt_lower or "biologics" in prompt_lower:
-            ki_text = (
-                "### 🚨 EXEKUTIVE ZUSAMMENFASSUNG: HOHE RELEVANZ\\n"
-                "Das identifizierte EU-Dokument reformiert die Offenlegungspflichten für klinische Studien "
-                "und biopharmazeutische Zulassungen. Es besteht akuter Handlungsbedarf für forschende Unternehmen, "
-                "da geschützte Geschäftsdaten (IP) betroffen sein könnten.\\n\\n"
-                "**Empfohlene Public Affairs-Roadmap:**\\n"
-                "1. 🇪🇺 **Direktes Lobbying:** Kontaktaufnahme mit den Koordinatoren des ENVI-Ausschusses im Europäischen Parlament.\\n"
-                "2. 🤝 **Verbands-Allianz:** Einberufung einer Krisensitzung über die Branchenverbände (z. B. EFPIA / vfa) zur Bündelung der Kräfte.\\n"
-                "3. 📄 **Position Paper:** Finalisierung eines zweiseitigen technischen Briefings zu den ökonomischen Standortrisiken innerhalb von 14 Tagen."
-            )
-        elif "medical devices" in prompt_lower or "software" in prompt_lower:
-            ki_text = (
-                "### ⚠️ EXEKUTIVE ZUSAMMENFASSUNG: MITTLERE RELEVANZ\\n"
-                "Es handelt sich um eine Anpassung der harmonisierten Normen im Rahmen der Medical Device Regulation (MDR). "
-                "Keine unmittelbare Gefahr für bestehende Zulassungen, jedoch mittelfristige Audit-Risiken für Neuentwicklungen.\\n\\n"
-                "**Empfohlene Public Affairs-Roadmap:**\\n"
-                "1. 🔍 **Konformitäts-Check:** Abgleich der internen Qualitätsmanagement-Prozesse mit den neuen technischen Anhängen.\\n"
-                "2. 🏢 **Notified Body:** Frühzeitige Konsultation der Benannten Stelle zur Vermeidung von Zertifizierungsstaus."
-            )
-        else:
-            ki_text = (
-                "### 🟢 EXEKUTIVE ZUSAMMENFASSUNG: NIEDRIGE RELEVANZ\\n"
-                "Der Sektor wird durch die Rechtsvorschrift nur peripher tangiert. Es sind keine regulatorischen Hürden zu erwarten.\\n\\n"
-                "**Empfehlung:** Der Vorgang wird rein dokumentarisch im Quartalsbericht erfasst. Keine operativen Maßnahmen notwendig."
-            )
+PHARMA_KEYWORDS = ["medicinal", "pharma", "clinical", "health", "medical device", "medicine", "biologic"]
+CATEGORIES = [
+    "Clinical Trials Transparency",
+    "Intellectual Property & Patents",
+    "Medical Device Compliance",
+    "Not relevant",
+]
+RELEVANCE = ["high", "medium", "low"]
 
-        return {
-            "status": "success",
-            "model_used": model,
-            "choices": [{"message": {"content": ki_text}}]
-        }
+SYSTEM_PROMPT = f"""
+You are an analyst for EU health regulation. Assess the user's EU document for a pharmaceutical company.
 
-# MONITORING-ENGINE: EUR-LEX RSS SCRAPER
+Respond only in the following JSON format:
+{{
+  "category": one of {json.dumps(CATEGORIES, ensure_ascii=False)},
+  "relevance": one of {json.dumps(RELEVANCE)},
+  "summary": "2-3 sentences",
+  "actions": ["concrete public affairs action", "..."]
+}}
+""".strip()
 
-def fetch_eu_pharma_stream():
-    """Überwacht das EU-Amtsblatt via EUR-Lex-Schnittstelle auf gesundheitsrelevante Gesetze."""
-    print("🔮 [1/3] Scrape aktuelle EU-Dokumente aus der EUR-Lex Datenbank...")
-    url = "https://europa.eu"
-    
+# Sample documents, used when no RSS feed is configured or reachable
+SAMPLE_DOCUMENTS = [
+    {
+        "title": "Proposal for a Regulation on the European Health Data Space (EHDS)",
+        "link": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52022PC0197",
+        "date": "2022-05-03",
+    },
+    {
+        "title": "Commission Implementing Decision on harmonised standards for medical devices",
+        "link": "https://eur-lex.europa.eu/",
+        "date": "Sample",
+    },
+]
+
+
+# DATA SOURCE: EUR-LEX RSS FEED
+
+def fetch_eu_pharma_documents(max_docs=5):
+    """Reads the EUR-Lex RSS feed and returns health-related documents."""
+    if not RSS_URL:
+        print("ℹ️  No EURLEX_RSS_URL set, using sample documents.")
+        return SAMPLE_DOCUMENTS, True
+
+    print(f"🔎 Loading EUR-Lex feed: {RSS_URL}")
     try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.content, "xml")
-        items = soup.find_all("item")
-        
-        pharma_keywords = ["medicinal", "pharma", "clinical", "health", "medical devices", "Arzneimittel", "Gesundheit"]
-        detected_docs = []
-        
-        for item in items:
-            title = item.title.text.strip()
-            if any(kw.lower() in title.lower() for kw in pharma_keywords):
-                detected_docs.append({
-                    "title": title,
-                    "link": item.link.text.strip() if item.link else "https://europa.eu",
-                    "date": item.pubDate.text.strip() if item.pubDate else "Aktuell"
-                })
-        
-        if detected_docs:
-            return detected_docs[:2]  # Beschränkung auf die neuesten Treffer
-    except Exception as e:
-        print(f"⚠️ EUR-Lex Live-Schnittstelle temporär blockiert ({e}). Nutze integrierte Echtzeit-Pipeline...")
-    
-    # Hochrelevanter Fallback-Vorgang für die System-Demonstration
-    return [{
-        "title": "Regulation on European Health Data Space (EHDS) and requirements for clinical trials data transparency",
-        "link": "https://europa.eu/legal-content/EN/TXT/?uri=CELEX:52022PC0197",
-        "date": "Wed, 21 Oct 2026 14:00:00 GMT"
-    }]
+        response = requests.get(RSS_URL, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"⚠️  Feed unreachable ({e}), using sample documents.")
+        return SAMPLE_DOCUMENTS, True
 
-# INTERFACE: GENERATOR FÜR DAS WEB-DASHBOARD
-def compile_web_dashboard(output_file, results_data):
-    """Kompiliert alle Ergebnisse in eine voll funktionsfähige, moderne Überwachungs-Webseite."""
-    print(f"🖥️  [3/3] Generiere interaktives Web-Dashboard: '{output_file}'...")
-    
-    # HTML-Struktur der Fallkarten dynamisch aufbauen
-    cards_html = ""
-    for item in results_data:
-        # Einfache Formatierung für HTML-Zeilenumbrüche im Dashboard
-        parsed_ki_text = item['analysis'].replace('\\n', '<br>').replace('###', '<h2>')
-        
-        # Bestimme Dringlichkeits-Farbe
-        badge_style = "priority-high" if "🚨" in parsed_ki_text else ("priority-med" if "⚠️" in parsed_ki_text else "priority-low")
-        badge_label = "🚨 Hoch" if "🚨" in parsed_ki_text else ("⚠️ Mittel" if "⚠️" in parsed_ki_text else "🟢 Niedrig")
+    soup = BeautifulSoup(response.content, "xml")
+    documents = []
+    for item in soup.find_all("item"):
+        title = item.title.text.strip() if item.title else ""
+        if any(kw in title.lower() for kw in PHARMA_KEYWORDS):
+            documents.append({
+                "title": title,
+                "link": item.link.text.strip() if item.link else "",
+                "date": item.pubDate.text.strip() if item.pubDate else "",
+            })
 
-        cards_html += f"""
-        <div class="card">
-            <div class="card-title">🚨 System-Alarm: Regulatorischer Neueintrag</div>
-            <table class="meta-table">
-                <tr><td>EU-Dokument</td><td><strong>{item['title']}</strong></td></tr>
-                <tr><td>Ziel-Mandant</td><td><span class="client-tag">{item['client']}</span></td></tr>
-                <tr><td>Dringlichkeit</td><td><span class="priority-badge {badge_style}">{badge_label}</span></td></tr>
-                <tr><td>Erfassungsdatum</td><td>{item['date']}</td></tr>
-            </table>
-            <div class="ai-analysis">
-                {parsed_ki_text}
-            </div>
-            <div style="margin-top: 20px; text-align: right;">
-                <a href="{item['link']}" target="_blank" class="btn">Original-Gesetzestext (EUR-Lex) öffnen ↗</a>
-            </div>
-        </div>
-        """
+    print(f"   {len(documents)} relevant documents found.")
+    return documents[:max_docs], False
 
-    html_layout = f"""<!DOCTYPE html>
-    <html lang="de">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>EU Pharma Monitoring Platform</title>
-        <style>
-            :root {{
-                --primary: #2c3e50; --danger: #d9534f; --warning: #f0ad4e; --success: #5cb85c;
-                --bg: #f4f6f8; --card-bg: #ffffff; --text: #333333;
-            }}
-            body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: var(--text); background-color: var(--bg); margin: 0; }}
-            header {{ background-color: var(--primary); color: white; padding: 20px 40px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            header h1 {{ margin: 0; font-size: 22px; }}
-            .live-badge {{ background-color: var(--danger); color: white; padding: 6px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; animation: pulse 2s infinite; }}
-            @keyframes pulse {{ 0% {{ opacity: 0.6; }} 50% {{ opacity: 1; }} 100% {{ opacity: 0.6; }} }}
-            main {{ max-width: 1200px; margin: 30px auto; padding: 0 20px; display: grid; grid-template-columns: 2.5fr 1fr; gap: 30px; }}
-            @media (max-width: 900px) {{ main {{ grid-template-columns: 1fr; }} }}
-            .card {{ background: var(--card-bg); padding: 25px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.04); margin-bottom: 25px; border-top: 4px solid var(--primary); }}
-            .card-title {{ font-size: 18px; font-weight: bold; color: var(--primary); margin-top: 0; margin-bottom: 15px; }}
-            .meta-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }}
-            .meta-table td {{ padding: 10px 0; border-bottom: 1px solid #f4f4f4; }}
-            .meta-table td:first-child {{ font-weight: bold; color: #777777; width: 25%; }}
-            .client-tag {{ background: #eef2f7; padding: 3px 8px; border-radius: 4px; font-weight: bold; color: var(--primary); }}
-            .priority-badge {{ display: inline-block; padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 12px; }}
-            .priority-high {{ background-color: #fdd9d7; color: var(--danger); }}
-            .priority-med {{ background-color: #fef0de; color: #b97513; }}
-            .priority-low {{ background-color: #dff0d8; color: var(--success); }}
-            .ai-analysis {{ background-color: #fffdf5; border: 1px solid #f0e6c4; padding: 20px; border-radius: 4px; font-size: 14px; }}
-            .ai-analysis h2 {{ font-size: 15px; color: #795548; margin-top: 0; text-transform: uppercase; border-bottom: 1px dashed #f0e6c4; padding-bottom: 5px; }}
+
+# ANALYSIS: LOCAL LLM VIA OLLAMA
+
+def analyze_with_ollama(document):
+    """Has a local Llama 3 model classify the document."""
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": document["title"]},
+            ],
+            "format": "json",  # Enforces valid JSON
+            "stream": False,
+            "options": {"temperature": 0},
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    return validate_analysis(json.loads(response.json()["message"]["content"]))
+
+
+def analyze_demo(document):
+    """Simple keyword rules as a fallback when no LLM is available."""
+    title = document["title"].lower()
+    if "clinical" in title or "health data" in title:
+        return {
+            "category": "Clinical Trials Transparency",
+            "relevance": "high",
+            "summary": "The document concerns disclosure obligations for clinical trial and health data.",
+            "actions": ["Align positions with industry associations (EFPIA)", "Prepare a technical briefing"],
+        }
+    if "medical device" in title:
+        return {
+            "category": "Medical Device Compliance",
+            "relevance": "medium",
+            "summary": "The document updates technical standards under the MDR.",
+            "actions": ["Review internal QM processes against the new standards"],
+        }
+    return {
+        "category": "Not relevant",
+        "relevance": "low",
+        "summary": "No direct impact on the pharma sector identified.",
+        "actions": [],
+    }
+
+
+def validate_analysis(result):
+    """Validates the LLM response instead of trusting it blindly."""
+    if result.get("category") not in CATEGORIES:
+        raise ValueError(f"Unknown category: {result.get('category')!r}")
+    if result.get("relevance") not in RELEVANCE:
+        raise ValueError(f"Unknown relevance: {result.get('relevance')!r}")
+    return {
+        "category": result["category"],
+        "relevance": result["relevance"],
+        "summary": str(result.get("summary", "")),
+        "actions": [str(m) for m in result.get("actions", [])],
+    }
+
+
+def analyze_documents(documents, demo):
+    results = []
+    for doc in documents:
+        print(f"🤖 Analyzing: {doc['title'][:70]}")
+        try:
+            analysis = analyze_demo(doc) if demo else analyze_with_ollama(doc)
+        except Exception as e:
+            print(f"   ⚠️  Analysis failed: {e}")
+            continue
+        results.append({**doc, **analysis})
+    return results
+
+
+# OUTPUT: HTML DASHBOARD
+
+BADGES = {"high": "🚨 High", "medium": "⚠️ Medium", "low": "🟢 Low"}
+
+CSS = """
+:root { --primary: #2c3e50; --danger: #d9534f; --success: #5cb85c; --bg: #f4f6f8; --card-bg: #fff; --text: #333; }
+body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: var(--text); background: var(--bg); margin: 0; }
+header { background: var(--primary); color: #fff; padding: 20px 40px; }
+header h1 { margin: 0; font-size: 22px; }
+header p { margin: 4px 0 0; font-size: 13px; opacity: 0.8; }
+main { max-width: 900px; margin: 30px auto; padding: 0 16px; }
+.notice { background: #fef0de; color: #b97513; padding: 10px 16px; border-radius: 4px; margin-bottom: 20px; font-size: 14px; }
+.card { background: var(--card-bg); padding: 25px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.04); margin-bottom: 25px; border-top: 4px solid var(--primary); }
+.card h2 { font-size: 17px; color: var(--primary); margin: 0 0 15px; }
+.meta-table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 14px; }
+.meta-table td { padding: 8px 0; border-bottom: 1px solid #f4f4f4; }
+.meta-table td:first-child { font-weight: bold; color: #777; width: 25%; }
+.badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+.high { background: #fdd9d7; color: var(--danger); }
+.medium { background: #fef0de; color: #b97513; }
+.low { background: #dff0d8; color: var(--success); }
+.analysis { background: #fffdf5; border: 1px solid #f0e6c4; padding: 16px 20px; border-radius: 4px; font-size: 14px; }
+.btn { color: var(--primary); font-weight: bold; }
+"""
+
+
+def render_card(item):
+    e = html.escape  # Escape all text from the feed and the LLM
+    actions = "".join(f"<li>{e(m)}</li>" for m in item["actions"])
+    link = f'<p><a class="btn" href="{e(item["link"])}" target="_blank" rel="noopener">Open document on EUR-Lex ↗</a></p>' if item["link"] else ""
+    return f"""
+    <div class="card">
+      <h2>{e(item["title"])}</h2>
+      <table class="meta-table">
+        <tr><td>Category</td><td>{e(item["category"])}</td></tr>
+        <tr><td>Relevance</td><td><span class="badge {item["relevance"]}">{BADGES[item["relevance"]]}</span></td></tr>
+        <tr><td>Date</td><td>{e(item["date"])}</td></tr>
+      </table>
+      <div class="analysis">
+        <p>{e(item["summary"])}</p>
+        {f"<strong>Recommended actions:</strong><ol>{actions}</ol>" if actions else ""}
+      </div>
+      {link}
+    </div>"""
+
+
+def build_dashboard(results, output_file, notices):
+    order = {r: i for i, r in enumerate(RELEVANCE)}
+    results = sorted(results, key=lambda r: order[r["relevance"]])
+
+    notice = "".join(f'<div class="notice">{html.escape(n)}</div>' for n in notices)
+    cards = "".join(render_card(r) for r in results) or "<p>No relevant documents found.</p>"
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EU Pharma Regulation Monitor</title>
+  <style>{CSS}</style>
+</head>
+<body>
+  <header>
+    <h1>EU Pharma Regulation Monitor</h1>
+    <p>Updated: {datetime.now():%Y-%m-%d %H:%M}</p>
+  </header>
+  <main>{notice}{cards}</main>
+</body>
+</html>"""
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(page)
+    print(f"🖥️  Dashboard saved: {output_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Monitors EUR-Lex for pharma-relevant EU legislation.")
+    parser.add_argument("--demo", action="store_true", help="Run with rule-based analysis instead of Ollama")
+    parser.add_argument("--output", default="dashboard.html", help="Path of the HTML output")
+    args = parser.parse_args()
+
+    documents, sample_data = fetch_eu_pharma_documents()
+    results = analyze_documents(documents, args.demo)
+
+    notices = []
+    if sample_data:
+        notices.append("Sample data: no EUR-Lex feed was loaded.")
+    if args.demo:
+        notices.append("Demo mode: rule-based analysis instead of LLM.")
+    build_dashboard(results, args.output, notices)
+
+
+if __name__ == "__main__":
+    main()
