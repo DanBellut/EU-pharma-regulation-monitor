@@ -1,10 +1,17 @@
-An automated Python project that collects real-time public data from European legislative databases and filters them into high-relevance regulatory impact categories using a local LLM.Instead of manually scrolling through extensive legal texts and official journals, this tool automatically scans public draft laws on EUR-Lex, focuses on critical healthcare policy shifts, and displays them inside a clean, live dashboard.
+++++EU Pharma Regulation Monitor+++
 
-Features 
-Data Mining Hub: Simulates and processes live public document streams from the official EUR-Lex RSS repository based on custom keyword routing for European healthcare.
-AI Classification: Uses a local LLM (Ollama/Llama 3) to filter out unrelated bureaucratic noise, ensuring legislative changes are strictly categorized into three distinct pharma sectors: Clinical Trials Transparency, Intellectual Property & Patents, and Medical Device Compliance.
-Automated Synthesis: Generates rapid, low-latency Public Affairs action points in English to provide an immediate strategic overview of regulatory risks as they happen.
-Privacy-First Blueprint: Operates completely in-memory with zero persistent cookie tracking or stored government session files, keeping credential handling safe for local deployment.
-Built for Scaling: Cleanly decoupled frontend and backend architecture, designed to easily integrate persistent relational databases (SQLite) and enterprise-grade scraping layers for global health authorities in the future.
+A Python tool that scans EUR-Lex for new EU legislation relevant to the pharma sector, classifies each document with a local LLM and creates an HTML dashboard with prioritized Public Affairs recommendations.
 
-Tech Stack Language: Python 3.10+  Interface: Streamlit Legal Mining: BeautifulSoup4 / Requests AI Processing: Ollama (Llama 3)
+Status
+Early prototype.
+
+Features
+EUR-Lex monitoring:Reads an EUR-Lex RSS feed and keeps only documents that match healthcare keywords such as "medicinal", "clinical" or "medical device".
+Uses Llama 3 via Ollama in JSON mode with `temperature=0` to sort each document into Clinical Trials Transparency, Intellectual Property & Patents or Medical Device Compliance. No data leaves your machine.
+Output validation: Categories and relevance levels outside the allowed lists are rejected instead of silently entering the dashboard.
+Actionable briefings: Each document gets a relevance rating (high / medium / low), a short summary and recommended Public Affairs actions.
+HTML dashboard: Results are rendered as a static web page, sorted by relevance, with all text from the feed and the LLM safely escaped.
+Demo mode: Runs without Ollama using rule-based analysis, and the dashboard clearly marks when sample data or demo mode is used.
+Roadmap
+
+Streamlit interface · SQLite storage · analysis of full legal texts · additional health authorities
